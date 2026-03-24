@@ -109,6 +109,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     entry.async_on_unload(entry.add_update_listener(update_listener))
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
+    coordinator.async_request_hourly_condition_codes_refresh()
 
     await hass.config_entries.async_forward_entry_setups(
         entry,
@@ -177,6 +178,7 @@ class MeteoSwissDataUpdateCoordinator(DataUpdateCoordinator[MeteoSwissClientResu
         self.post_code = post_code
         self.forecast_name = forecast_name
         self._hourly_condition_codes_lock = asyncio.Lock()
+        self._hourly_condition_codes_task: asyncio.Task[None] | None = None
         _LOGGER.debug(
             "Forecast %s will be provided for post code %s every %s",
             forecast_name,
@@ -361,3 +363,32 @@ class MeteoSwissDataUpdateCoordinator(DataUpdateCoordinator[MeteoSwissClientResu
                 hourly_condition_codes  # type:ignore[literal-required]
             )
             self.async_set_updated_data(newdata)
+
+    def async_request_hourly_condition_codes_refresh(self) -> None:
+        """Schedule a background fetch of hourly condition codes."""
+        if self.data is None or self.data.get("hourly_condition_codes"):
+            return
+
+        if self._hourly_condition_codes_task and not self._hourly_condition_codes_task.done():
+            return
+
+        self._hourly_condition_codes_task = self.hass.async_create_task(
+            self.async_ensure_hourly_condition_codes()
+        )
+        self._hourly_condition_codes_task.add_done_callback(
+            self._async_handle_hourly_condition_codes_task_done
+        )
+
+    def _async_handle_hourly_condition_codes_task_done(
+        self, task: asyncio.Task[None]
+    ) -> None:
+        """Clear the background task reference and log unexpected failures."""
+        self._hourly_condition_codes_task = None
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            _LOGGER.exception(
+                "Unexpected error in MeteoSwiss hourly condition background refresh"
+            )
