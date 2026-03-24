@@ -318,7 +318,8 @@ class MeteoSwissDataUpdateCoordinator(DataUpdateCoordinator[MeteoSwissClientResu
             self.error_raised[CONF_POSTCODE] = False
 
         newdata = cast(MeteoSwissClientResult, data)
-        newdata["hourly_condition_codes"] = self.data.get(
+        existing_data = self.data if self.data is not None else {}
+        newdata["hourly_condition_codes"] = existing_data.get(
             "hourly_condition_codes", {}
         )  # type:ignore[literal-required]
         newdata[CONF_POSTCODE] = self.post_code  # type:ignore[literal-required]
