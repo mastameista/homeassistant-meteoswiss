@@ -127,6 +127,7 @@ class MeteoSwissWeather(
         self._displayName = data[CONF_FORECAST_NAME]
         self._forecastData = data["forecast"]
         self._condition_for_all_stations = data["condition"]
+        self._hourly_condition_codes = data.get("hourly_condition_codes", {})
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -277,15 +278,25 @@ class MeteoSwissWeather(
             return fcdata_out
         try:
             for forecast in forecast_data[idx - 1 :]:
+                forecast_time = (
+                    forecast["time"].isoformat("T").partition("+")[0] + "Z"
+                )
+                hourly_condition_code = self._hourly_condition_codes.get(forecast_time)
                 data_out: Forecast = {
-                    ATTR_FORECAST_TIME: forecast["time"]
-                    .isoformat("T")
-                    .partition("+")[0]
-                    + "Z",
+                    ATTR_FORECAST_TIME: forecast_time,
                     ATTR_FORECAST_NATIVE_TEMP_LOW: forecast["temperatureMin"],
                     ATTR_FORECAST_NATIVE_TEMP: forecast["temperatureMax"],
                     ATTR_FORECAST_NATIVE_PRECIPITATION: forecast["precipitationMax"],
                 }
+                if hourly_condition_code is not None:
+                    data_out[ATTR_FORECAST_CONDITION] = (
+                        str(
+                            CODE_TO_CONDITION_MAP.get(
+                                hourly_condition_code, ("", None)
+                            )[0]
+                        )
+                        or None
+                    )
                 fcdata_out.append(data_out)
         except Exception as e:
             _LOGGER.exception(

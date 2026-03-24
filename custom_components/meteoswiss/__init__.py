@@ -12,6 +12,7 @@ from homeassistant.config_entries import SOURCE_IMPORT, ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
 from homeassistant.core import HomeAssistant as HomeAssistantType
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.issue_registry import IssueSeverity
 from homeassistant.helpers.typing import ConfigType
@@ -32,6 +33,7 @@ from custom_components.meteoswiss.const import (
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
 )
+from custom_components.meteoswiss.opendata import async_fetch_hourly_condition_codes
 
 _LOGGER = logging.getLogger(__name__)
 PLATFORMS = [Platform.SENSOR, Platform.WEATHER]
@@ -140,6 +142,7 @@ class MeteoSwissClientResult(ClientResult):
     real_time_name: str
     precipitation_station: str
     real_time_precipitation_name: str
+    hourly_condition_codes: dict[str, int]
 
 
 class MeteoSwissDataUpdateCoordinator(DataUpdateCoordinator[MeteoSwissClientResult]):
@@ -313,6 +316,19 @@ class MeteoSwissDataUpdateCoordinator(DataUpdateCoordinator[MeteoSwissClientResu
             self.error_raised[CONF_POSTCODE] = False
 
         newdata = cast(MeteoSwissClientResult, data)
+        session = async_get_clientsession(self.hass)
+        try:
+            newdata["hourly_condition_codes"] = (
+                await async_fetch_hourly_condition_codes(
+                    session,
+                    self.post_code,
+                )
+            )  # type:ignore[literal-required]
+        except Exception:
+            _LOGGER.exception(
+                "Failed to fetch MeteoSwiss open data hourly condition codes"
+            )
+            newdata["hourly_condition_codes"] = {}  # type:ignore[literal-required]
         newdata[CONF_POSTCODE] = self.post_code  # type:ignore[literal-required]
         newdata[CONF_FORECAST_NAME] = self.forecast_name  # type:ignore[literal-required]
         newdata[CONF_STATION] = self.weather_station  # type:ignore[literal-required]
