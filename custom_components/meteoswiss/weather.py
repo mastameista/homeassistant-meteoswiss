@@ -319,4 +319,7 @@ class MeteoSwissWeather(
 
     async def async_forecast_hourly(self) -> list[Forecast]:
         """Return the hourly forecast in native units."""
+        if not self._hourly_condition_codes:
+            await self.coordinator.async_ensure_hourly_condition_codes()
+            self.__set_data(self.coordinator.data)
         return self._hourly_forecast() or []

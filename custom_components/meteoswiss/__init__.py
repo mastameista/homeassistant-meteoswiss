@@ -1,5 +1,6 @@
 """Lifecycle of MeteoSwiss."""
 
+import asyncio
 import datetime
 import logging
 import time
@@ -175,6 +176,7 @@ class MeteoSwissDataUpdateCoordinator(DataUpdateCoordinator[MeteoSwissClientResu
         self.hass = hass
         self.post_code = post_code
         self.forecast_name = forecast_name
+        self._hourly_condition_codes_lock = asyncio.Lock()
         _LOGGER.debug(
             "Forecast %s will be provided for post code %s every %s",
             forecast_name,
@@ -316,19 +318,9 @@ class MeteoSwissDataUpdateCoordinator(DataUpdateCoordinator[MeteoSwissClientResu
             self.error_raised[CONF_POSTCODE] = False
 
         newdata = cast(MeteoSwissClientResult, data)
-        session = async_get_clientsession(self.hass)
-        try:
-            newdata["hourly_condition_codes"] = (
-                await async_fetch_hourly_condition_codes(
-                    session,
-                    self.post_code,
-                )
-            )  # type:ignore[literal-required]
-        except Exception:
-            _LOGGER.exception(
-                "Failed to fetch MeteoSwiss open data hourly condition codes"
-            )
-            newdata["hourly_condition_codes"] = {}  # type:ignore[literal-required]
+        newdata["hourly_condition_codes"] = self.data.get(
+            "hourly_condition_codes", {}
+        )  # type:ignore[literal-required]
         newdata[CONF_POSTCODE] = self.post_code  # type:ignore[literal-required]
         newdata[CONF_FORECAST_NAME] = self.forecast_name  # type:ignore[literal-required]
         newdata[CONF_STATION] = self.weather_station  # type:ignore[literal-required]
@@ -338,3 +330,33 @@ class MeteoSwissDataUpdateCoordinator(DataUpdateCoordinator[MeteoSwissClientResu
             self.real_time_precipitation_station_name
         )  # type:ignore[literal-required]
         return newdata
+
+    async def async_ensure_hourly_condition_codes(self) -> None:
+        """Fetch hourly condition codes on demand to avoid blocking startup."""
+        if self.data.get("hourly_condition_codes"):
+            return
+
+        async with self._hourly_condition_codes_lock:
+            if self.data.get("hourly_condition_codes"):
+                return
+
+            session = async_get_clientsession(self.hass)
+            try:
+                hourly_condition_codes = await async_fetch_hourly_condition_codes(
+                    session,
+                    self.post_code,
+                )
+            except Exception:
+                _LOGGER.exception(
+                    "Failed to fetch MeteoSwiss open data hourly condition codes"
+                )
+                return
+
+            if not hourly_condition_codes:
+                return
+
+            newdata = cast(MeteoSwissClientResult, dict(self.data))
+            newdata["hourly_condition_codes"] = (
+                hourly_condition_codes  # type:ignore[literal-required]
+            )
+            self.async_set_updated_data(newdata)
