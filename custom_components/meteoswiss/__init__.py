@@ -280,11 +280,17 @@ class MeteoSwissDataUpdateCoordinator(DataUpdateCoordinator[MeteoSwissClientResu
 
     async def _async_update_data(self) -> MeteoSwissClientResult:
         """Update data via library."""
+        update_started = time.monotonic()
+        hourly_condition_refresh_seconds = 0.0
+        refreshed_hourly_condition_codes = False
+
         try:
             async with timeout(15):
+                forecast_fetch_started = time.monotonic()
                 data = await self.hass.async_add_executor_job(
                     self.client.get_typed_data,
                 )
+                forecast_fetch_seconds = time.monotonic() - forecast_fetch_started
         except Exception as exc:
             _LOGGER.exception("Failed getting data")
             raise UpdateFailed(exc) from exc
@@ -381,8 +387,12 @@ class MeteoSwissDataUpdateCoordinator(DataUpdateCoordinator[MeteoSwissClientResu
             )
         else:
             try:
+                hourly_condition_refresh_started = time.monotonic()
                 refreshed_hourly_condition_codes = (
                     await self._async_fetch_valid_hourly_condition_codes(newdata)
+                )
+                hourly_condition_refresh_seconds = (
+                    time.monotonic() - hourly_condition_refresh_started
                 )
             except Exception:
                 _LOGGER.exception(
@@ -395,6 +405,9 @@ class MeteoSwissDataUpdateCoordinator(DataUpdateCoordinator[MeteoSwissClientResu
                 if refreshed_hourly_condition_codes is not None
                 else existing_hourly_condition_codes
             )  # type:ignore[literal-required]
+            refreshed_hourly_condition_codes = (
+                refreshed_hourly_condition_codes is not None
+            )
         newdata[CONF_POSTCODE] = self.post_code  # type:ignore[literal-required]
         newdata[CONF_FORECAST_NAME] = self.forecast_name  # type:ignore[literal-required]
         newdata[CONF_STATION] = self.weather_station  # type:ignore[literal-required]
@@ -403,6 +416,22 @@ class MeteoSwissDataUpdateCoordinator(DataUpdateCoordinator[MeteoSwissClientResu
         newdata[CONF_REAL_TIME_PRECIPITATION_NAME] = (
             self.real_time_precipitation_station_name
         )  # type:ignore[literal-required]
+        total_update_seconds = time.monotonic() - update_started
+        _LOGGER.debug(
+            "MeteoSwiss update timings: forecast=%.2fs hourly_conditions=%.2fs total=%.2fs refreshed_hourly_conditions=%s",
+            forecast_fetch_seconds,
+            hourly_condition_refresh_seconds,
+            total_update_seconds,
+            refreshed_hourly_condition_codes,
+        )
+        if total_update_seconds > 5:
+            _LOGGER.info(
+                "MeteoSwiss update was slow: forecast=%.2fs hourly_conditions=%.2fs total=%.2fs refreshed_hourly_conditions=%s",
+                forecast_fetch_seconds,
+                hourly_condition_refresh_seconds,
+                total_update_seconds,
+                refreshed_hourly_condition_codes,
+            )
         return newdata
 
     async def async_ensure_hourly_condition_codes(self) -> None:

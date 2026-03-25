@@ -72,20 +72,33 @@ async def async_fetch_hourly_condition_codes(
     postcode: int,
 ) -> dict[str, int]:
     """Fetch hourly MeteoSwiss icon codes keyed by forecast timestamp."""
+    total_started = dt.datetime.now(dt.timezone.utc)
+    point_lookup_started = dt.datetime.now(dt.timezone.utc)
     point_id = await _async_get_postcode_point_id(session, postcode)
+    point_lookup_seconds = (
+        dt.datetime.now(dt.timezone.utc) - point_lookup_started
+    ).total_seconds()
     if point_id is None:
         _LOGGER.warning("No MeteoSwiss open data point found for postcode %s", postcode)
         return {}
 
     now_utc = dt.datetime.now(dt.timezone.utc).date()
     asset_url: str | None = None
+    stac_lookup_seconds = 0.0
     for date_value in (now_utc, now_utc - dt.timedelta(days=1)):
         item_url = LOCAL_FORECAST_ITEM_URL.format(date=date_value.strftime("%Y%m%d"))
+        stac_lookup_started = dt.datetime.now(dt.timezone.utc)
         async with session.get(item_url) as response:
             if response.status == 404:
+                stac_lookup_seconds += (
+                    dt.datetime.now(dt.timezone.utc) - stac_lookup_started
+                ).total_seconds()
                 continue
             response.raise_for_status()
             item = await response.json()
+        stac_lookup_seconds += (
+            dt.datetime.now(dt.timezone.utc) - stac_lookup_started
+        ).total_seconds()
         asset_url = _latest_jww_asset_url(item)
         if asset_url:
             break
@@ -97,9 +110,13 @@ async def async_fetch_hourly_condition_codes(
         )
         return {}
 
+    csv_fetch_started = dt.datetime.now(dt.timezone.utc)
     async with session.get(asset_url) as response:
         response.raise_for_status()
         text = await response.text(encoding="latin-1")
+    csv_fetch_seconds = (
+        dt.datetime.now(dt.timezone.utc) - csv_fetch_started
+    ).total_seconds()
 
     codes: dict[str, int] = {}
     reader = csv.DictReader(io.StringIO(text), delimiter=";")
@@ -115,10 +132,15 @@ async def async_fetch_hourly_condition_codes(
         except ValueError:
             continue
 
+    total_seconds = (dt.datetime.now(dt.timezone.utc) - total_started).total_seconds()
     _LOGGER.debug(
-        "Fetched %d hourly MeteoSwiss icon codes for postcode %s from %s",
+        "Fetched %d hourly MeteoSwiss icon codes for postcode %s from %s in %.2fs (point_lookup=%.2fs stac_lookup=%.2fs csv_fetch=%.2fs)",
         len(codes),
         postcode,
         asset_url,
+        total_seconds,
+        point_lookup_seconds,
+        stac_lookup_seconds,
+        csv_fetch_seconds,
     )
     return codes
