@@ -226,6 +226,58 @@ class MeteoSwissDataUpdateCoordinator(DataUpdateCoordinator[MeteoSwissClientResu
             update_interval=update_interval,
         )
 
+    @staticmethod
+    def _hourly_forecast_time_to_iso8601_z(forecast_time: datetime.datetime) -> str:
+        return forecast_time.isoformat("T").partition("+")[0] + "Z"
+
+    def _required_hourly_condition_timestamps(
+        self, data: MeteoSwissClientResult | ClientResult
+    ) -> set[str]:
+        forecast = data.get("forecast")
+        if not forecast:
+            return set()
+
+        hourly_forecast = forecast.get("regionHourlyForecast")
+        if not hourly_forecast:
+            return set()
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        return {
+            self._hourly_forecast_time_to_iso8601_z(hourly["time"])
+            for hourly in hourly_forecast
+            if hourly["time"] > now
+        }
+
+    def _hourly_condition_codes_cover_forecast(
+        self,
+        data: MeteoSwissClientResult | ClientResult,
+        hourly_condition_codes: dict[str, int],
+    ) -> bool:
+        required_timestamps = self._required_hourly_condition_timestamps(data)
+        return not required_timestamps or required_timestamps.issubset(
+            hourly_condition_codes
+        )
+
+    async def _async_fetch_valid_hourly_condition_codes(
+        self,
+        data: MeteoSwissClientResult | ClientResult,
+    ) -> dict[str, int] | None:
+        session = async_get_clientsession(self.hass)
+        hourly_condition_codes = await async_fetch_hourly_condition_codes(
+            session,
+            self.post_code,
+        )
+        if not hourly_condition_codes:
+            return None
+
+        if not self._hourly_condition_codes_cover_forecast(data, hourly_condition_codes):
+            _LOGGER.warning(
+                "Fetched MeteoSwiss hourly condition codes do not fully cover the current forecast horizon"
+            )
+            return None
+
+        return hourly_condition_codes
+
     async def _async_update_data(self) -> MeteoSwissClientResult:
         """Update data via library."""
         try:
@@ -321,9 +373,28 @@ class MeteoSwissDataUpdateCoordinator(DataUpdateCoordinator[MeteoSwissClientResu
 
         newdata = cast(MeteoSwissClientResult, data)
         existing_data = self.data if self.data is not None else {}
-        newdata["hourly_condition_codes"] = existing_data.get(
-            "hourly_condition_codes", {}
-        )  # type:ignore[literal-required]
+        existing_hourly_condition_codes = existing_data.get("hourly_condition_codes", {})
+
+        if self.data is None:
+            newdata["hourly_condition_codes"] = (
+                existing_hourly_condition_codes  # type:ignore[literal-required]
+            )
+        else:
+            try:
+                refreshed_hourly_condition_codes = (
+                    await self._async_fetch_valid_hourly_condition_codes(newdata)
+                )
+            except Exception:
+                _LOGGER.exception(
+                    "Failed to refresh MeteoSwiss open data hourly condition codes"
+                )
+                refreshed_hourly_condition_codes = None
+
+            newdata["hourly_condition_codes"] = (
+                refreshed_hourly_condition_codes
+                if refreshed_hourly_condition_codes is not None
+                else existing_hourly_condition_codes
+            )  # type:ignore[literal-required]
         newdata[CONF_POSTCODE] = self.post_code  # type:ignore[literal-required]
         newdata[CONF_FORECAST_NAME] = self.forecast_name  # type:ignore[literal-required]
         newdata[CONF_STATION] = self.weather_station  # type:ignore[literal-required]
@@ -336,18 +407,28 @@ class MeteoSwissDataUpdateCoordinator(DataUpdateCoordinator[MeteoSwissClientResu
 
     async def async_ensure_hourly_condition_codes(self) -> None:
         """Fetch hourly condition codes on demand to avoid blocking startup."""
-        if self.data.get("hourly_condition_codes"):
+        if self.data is None:
+            return
+
+        if self._hourly_condition_codes_cover_forecast(
+            self.data,
+            self.data.get("hourly_condition_codes", {}),
+        ):
             return
 
         async with self._hourly_condition_codes_lock:
-            if self.data.get("hourly_condition_codes"):
+            if self.data is None:
                 return
 
-            session = async_get_clientsession(self.hass)
+            if self._hourly_condition_codes_cover_forecast(
+                self.data,
+                self.data.get("hourly_condition_codes", {}),
+            ):
+                return
+
             try:
-                hourly_condition_codes = await async_fetch_hourly_condition_codes(
-                    session,
-                    self.post_code,
+                hourly_condition_codes = (
+                    await self._async_fetch_valid_hourly_condition_codes(self.data)
                 )
             except Exception:
                 _LOGGER.exception(
